@@ -37,10 +37,11 @@ async function handleDangerousCommand(
   }
 
   const allMatches = getAllMatches(command);
+  const display = command.trim().replace(/\s+/g, " ");
   const lines = [
     "⚠️ Dangerous Command",
     "",
-    `Command: ${command.trim().replace(/\s+/g, " ").slice(0, 80)}${command.length > 80 ? "..." : ""}`,
+    `${display.slice(0, 80)}${display.length > 80 ? "..." : ""}`,
     ...(allMatches.length > 1
       ? [
           "",
@@ -79,8 +80,10 @@ async function handleDangerousCommand(
 export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
-    const command = (event.input.command as string) || "";
-    if (!command.trim()) return undefined;
+    const raw = event.input.command;
+    if (typeof raw !== "string") return undefined;
+    const command = raw.trim();
+    if (!command) return undefined;
 
     const matched = isDangerous(command);
     if (!matched) return undefined;

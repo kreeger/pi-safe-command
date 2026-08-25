@@ -333,7 +333,8 @@ function matchTokens(pattern: string, command: string): boolean {
  * Substring match for literal patterns with special chars (=, --, ;).
  * The special char ensures no partial-word matches:
  *   "dd if="  matches "dd if=/dev/zero"  but not "dd if you want"
- *   "git branch -D"  matches "git branch -D main"  but not "git branch -Dd"
+ *   "git branch -D"  matches "git branch -D main"  and "git branch -Dd"
+ *     (case-insensitive substring — use glob patterns for stricter matching)
  */
 function matchesSubstring(pattern: string, command: string): boolean {
   return command.toLowerCase().includes(pattern.toLowerCase());
