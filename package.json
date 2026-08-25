@@ -1,0 +1,50 @@
+{
+  "name": "@kreeger/pi-safe-command",
+  "version": "0.1.0",
+  "files": [
+    "src",
+    "!src/__tests__",
+    "dangerPatterns.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "description": "Prompts for confirmation before running dangerous commands in the pi-coding-agent.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "safe-command",
+    "dangerous-commands"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kreeger/pi-safe-command.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "license": "MIT",
+  "author": "Ben Kreeger",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "release": "release-it"
+  },
+  "devDependencies": {
+    "@release-it/conventional-changelog": "^12.0.0",
+    "@types/node": "^25.6.0",
+    "release-it": "^21.0.2",
+    "typescript": "^6.0.3",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
