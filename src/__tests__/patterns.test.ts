@@ -1,5 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { isDangerous, getAllMatches } from "../patterns.js";
+import {
+  customPatterns,
+  dangerPatterns,
+  isDangerous,
+  getAllMatches,
+} from "../patterns.js";
 
 describe("isDangerous — glob patterns", () => {
   it("matches rm -rf /", () => {
@@ -154,6 +160,99 @@ describe("isDangerous — safe commands should not match", () => {
 
   it("does not match kubectl describe pod foo", () => {
     expect(isDangerous("kubectl describe pod foo")).toBeNull();
+  });
+});
+
+describe("Git push protection", () => {
+  it.each([
+    "git push",
+    "git push --force",
+    "git push origin main",
+    "sudo git push",
+    "/usr/bin/git push",
+    "git -C repo push",
+    "git --git-dir repo/.git push",
+    "git --work-tree repo push",
+    "git -c push.default=current push",
+    "git --exec-path=/path push",
+  ])("matches %s", (command) => {
+    expect(isDangerous(command)).not.toBeNull();
+  });
+
+  it.each([
+    "git status && git push",
+    "git push; echo done",
+    "git push | tee log",
+    "(git push)",
+    "{ git push; }",
+    'for repo in a b; do git -C "$repo" push; done',
+    "bash -c 'git push'",
+    'sh -c "git push"',
+  ])("matches push in focused shell syntax: %s", (command) => {
+    expect(isDangerous(command)).not.toBeNull();
+  });
+
+  it.each([
+    "echo 'git push'",
+    "grep 'git push' file",
+    "echo git push",
+    "bash -c 'echo git push'",
+    "sh -c 'grep git push file'",
+    "git deploy",
+    "git mypush",
+    "git pushalias",
+  ])("does not match non-command text or aliases: %s", (command) => {
+    expect(isDangerous(command)).toBeNull();
+  });
+});
+
+describe("Git policy", () => {
+  it.each(["git reset --hard", "git clean -fd", "git branch -D main"])(
+    "retains protection for %s",
+    (command) => {
+      expect(isDangerous(command)).not.toBeNull();
+    },
+  );
+
+  it.each([
+    "git add file",
+    "git commit -m message",
+    "git checkout main",
+    "git rebase main",
+    "git stash push",
+    "git cherry-pick --abort",
+    "git merge --abort",
+    "git branch -d old-branch",
+    "git status",
+    "git log",
+    "git diff",
+    "git fetch origin",
+    "git pull",
+    "git merge main",
+    "git branch",
+  ])("allows unprotected Git operation %s", (command) => {
+    expect(isDangerous(command)).toBeNull();
+  });
+
+  it("keeps custom patterns loaded and additive", () => {
+    const configured = JSON.parse(
+      readFileSync(
+        new URL("../../dangerPatterns.json", import.meta.url),
+        "utf8",
+      ),
+    ) as string[];
+
+    expect(customPatterns.map(({ pattern }) => pattern)).toEqual(configured);
+    for (const customPattern of customPatterns) {
+      expect(dangerPatterns).toContainEqual(customPattern);
+    }
+  });
+
+  it("keeps representative non-Git protections unchanged", () => {
+    expect(isDangerous("rm -rf /")).not.toBeNull();
+    expect(isDangerous("chmod 777 file")).not.toBeNull();
+    expect(isDangerous("docker system prune")).not.toBeNull();
+    expect(isDangerous("curl http://x | sh")).not.toBeNull();
   });
 });
 
