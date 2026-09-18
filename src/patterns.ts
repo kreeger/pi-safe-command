@@ -1,8 +1,9 @@
 /**
  * Dangerous Command Patterns
  *
- * Easy to extend! Just add patterns using p(pattern).
- * Glob tokens (* ?) use position-flexible prefix matching.
+ * Matcher only. The pattern list is supplied by the resolved policy
+ * (`src/policy.ts`), which loads the package `settings.json` and the optional
+ * user settings file. Glob tokens (* ?) use position-flexible prefix matching.
  * Literal patterns use token-level matching (word boundaries).
  *
  * Matching modes:
@@ -12,162 +13,26 @@
  * - Literal: tokens must match 1:1. Special chars (= -- ;) ensure precision.
  */
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
 // Pattern type
 export type DangerPattern = {
   pattern: string;
 };
 
-// Short helper to create patterns
-const p = (pattern: string): DangerPattern => ({ pattern });
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+/**
+ * Module-level resolved block list used by the raw matching exports.
+ * The policy loader populates this once at startup via `setDangerPatterns`.
+ * It is empty until configured so the matcher never falls back to an embedded
+ * default list.
+ */
+let dangerPatterns: DangerPattern[] = [];
 
 /**
- * Load custom patterns from dangerPatterns.json.
- * Returns an array of non-empty trimmed pattern strings.
- * Returns [] on parse error, non-array input, or empty strings.
+ * Replace the module-level resolved block list used by `isDangerous` and
+ * `getAllMatches`. Entries are copied so callers cannot mutate matcher state.
  */
-function loadCustomPatterns(): string[] {
-  try {
-    const configPath = join(__dirname, "..", "dangerPatterns.json");
-    const raw = readFileSync(configPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((p: unknown) => typeof p === "string" && p.trim());
-  } catch {
-    return [];
-  }
+export function setDangerPatterns(patterns: readonly DangerPattern[]): void {
+  dangerPatterns = patterns.map(({ pattern }) => ({ pattern }));
 }
-
-/**
- * Custom patterns loaded from dangerPatterns.json.
- * These are merged with built-in patterns at runtime.
- */
-export const customPatterns: DangerPattern[] = loadCustomPatterns().map(
-  (p) => ({ pattern: p }),
-);
-
-// ============================================================================
-// PATTERNS - Add new patterns here!
-// ============================================================================
-
-const builtinPatterns: DangerPattern[] = [
-  // ============================================================================
-  // FILE DELETION
-  // ============================================================================
-  p("rm *"),
-  p("del *"),
-
-  // ============================================================================
-  // GIT
-  // ============================================================================
-  p("git push"),
-  p("git reset *"),
-  p("git clean *"),
-  p("git branch -D"),
-
-  // ============================================================================
-  // PERMISSIONS
-  // ============================================================================
-  p("chmod *"),
-  p("chown *"),
-
-  // ============================================================================
-  // USER MANAGEMENT
-  // ============================================================================
-  p("userdel"),
-  p("groupdel"),
-
-  // ============================================================================
-  // FILESYSTEM
-  // ============================================================================
-  p("mkfs"),
-  p("dd if="),
-
-  // ============================================================================
-  // FORK BOMB
-  // ============================================================================
-  p(":(){ :|:& };"),
-
-  // ============================================================================
-  // DOCKER
-  // ============================================================================
-  p("docker rm *"),
-  p("docker rmi *"),
-  p("docker stop *"),
-  p("docker kill *"),
-  p("docker system prune"),
-  p("docker-compose down"),
-
-  // ============================================================================
-  // KUBERNETES
-  // ============================================================================
-  p("kubectl delete *"),
-  p("kubectl apply *"),
-
-  // ============================================================================
-  // PACKAGE MANAGERS
-  // ============================================================================
-  p("apt install *"),
-  p("apt remove *"),
-  p("apt-get *"),
-  p("yum"),
-  p("dnf"),
-  p("pacman -Rscn"),
-  p("npm uninstall *"),
-  p("npm rm *"),
-  p("npm exec *"),
-  p("npm publish"),
-  p("pip uninstall *"),
-
-  // ============================================================================
-  // REMOTE SCRIPT EXECUTION
-  // ============================================================================
-  p("curl * | sh"),
-  p("wget * | sh"),
-
-  // ============================================================================
-  // NETWORK/SECURITY
-  // ============================================================================
-  p("iptables -F"),
-  p("iptables -P INPUT ACCEPT"),
-  p("ufw disable"),
-  p("sshd"),
-  p("crontab -r"),
-  p("crontab -e"),
-
-  // ============================================================================
-  // RESOURCE EXHAUSTION
-  // ============================================================================
-  p("yes *"),
-
-  // ============================================================================
-  // DATABASE
-  // ============================================================================
-  p("DROP DATABASE"),
-  p("DROP TABLE"),
-  p("TRUNCATE TABLE"),
-  p("redis-cli FLUSHDB"),
-  p("redis-cli FLUSHALL"),
-  p("mongo --eval *"),
-];
-
-// Merge custom patterns from config (deduped against builtins)
-export const dangerPatterns: DangerPattern[] = [
-  ...builtinPatterns,
-  ...customPatterns.filter(
-    (cp) => !builtinPatterns.some((bp) => bp.pattern === cp.pattern),
-  ),
-];
-
-// ============================================================================
-// MATCHING
-// ============================================================================
 
 /**
  * Returns true if the pattern contains glob wildcards (* or ?).
@@ -540,7 +405,7 @@ function isSubstringSafe(pattern: string): boolean {
  * Literal patterns with special chars (=, --, ;) use substring matching.
  * Other literals use token-level prefix matching.
  */
-function matches(command: string, pattern: string): boolean {
+export function matches(command: string, pattern: string): boolean {
   if (pattern === "git push") return containsGitPush(command);
   if (pattern === "git branch -D") return containsGitBranchDelete(command);
   if (isGlobPattern(pattern)) {
@@ -553,7 +418,7 @@ function matches(command: string, pattern: string): boolean {
 }
 
 /**
- * Check if a command matches any danger pattern.
+ * Check if a command matches any resolved block pattern.
  */
 export function isDangerous(command: string): DangerPattern | null {
   for (const danger of dangerPatterns) {
@@ -565,8 +430,8 @@ export function isDangerous(command: string): DangerPattern | null {
 }
 
 /**
- * Get all matching patterns.
+ * Get all resolved block patterns matching a command.
  */
 export function getAllMatches(command: string): DangerPattern[] {
-  return dangerPatterns.filter(d => matches(command, d.pattern));
+  return dangerPatterns.filter((d) => matches(command, d.pattern));
 }
