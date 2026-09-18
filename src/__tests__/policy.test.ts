@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  decidePolicy,
   normalizePattern,
+  resolvePolicy,
   validatePolicyDocument,
   type PolicyError,
 } from "../policy.js";
@@ -172,5 +174,137 @@ describe("normalizePattern", () => {
 
   it("leaves an already-normalized pattern unchanged", () => {
     expect(normalizePattern("rm *")).toBe("rm *");
+  });
+});
+
+describe("resolvePolicy", () => {
+  it("appends user blocks and deduplicates normalized duplicates", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *", "git push"] },
+      { version: 1, allow: ["rm /tmp/*"], block: [" GIT PUSH ", "curl * | sh"] },
+    );
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "git push",
+      "curl * | sh",
+    ]);
+  });
+
+  it("keeps package block order before user additions", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *", "git push"] },
+      { version: 1, allow: [], block: ["curl * | sh"] },
+    );
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "git push",
+      "curl * | sh",
+    ]);
+  });
+
+  it("treats user blocks as additive to package blocks", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *"] },
+      { version: 1, allow: [], block: ["chmod *"] },
+    );
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "chmod *",
+    ]);
+  });
+
+  it("uses only package defaults when the user policy is absent", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *"] },
+      null,
+    );
+    expect(policy.allows).toEqual([]);
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual(["rm *"]);
+  });
+
+  it("accepts non-identical allow/block overlaps", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *"] },
+      { version: 1, allow: ["rm *"], block: ["rm -rf *"] },
+    );
+    expect(decidePolicy(policy, "rm -rf /").status).toBe("allowed");
+  });
+
+  it("accepts no-op allow and block entries", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *"] },
+      { version: 1, allow: ["no-op-allow"], block: ["no-op-block"] },
+    );
+    expect(policy.allows.map(({ pattern }) => pattern)).toEqual([
+      "no-op-allow",
+    ]);
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "no-op-block",
+    ]);
+    expect(decidePolicy(policy, "git status").status).toBe("unmatched");
+  });
+
+  it("rejects an exact normalized user allow/block conflict", () => {
+    expect(() =>
+      resolvePolicy(
+        { version: 1, allow: [], block: [] },
+        { version: 1, allow: ["git push"], block: [" GIT PUSH "] },
+      ),
+    ).toThrow();
+  });
+});
+
+describe("decidePolicy", () => {
+  it("lets a matching user allow override every block match for that command", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *", "chmod *"] },
+      { version: 1, allow: ["rm *"], block: [] },
+    );
+    expect(decidePolicy(policy, "rm file; chmod 777 file").status).toBe(
+      "allowed",
+    );
+  });
+
+  it("returns the raw suppressed block matches for an allowed command", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *", "chmod *", "docker rm *"] },
+      { version: 1, allow: ["rm *"], block: [] },
+    );
+    const decision = decidePolicy(policy, "rm -rf / ; chmod 777 /tmp/f");
+    expect(decision.status).toBe("allowed");
+    expect(decision.allowMatches.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+    ]);
+    expect(decision.blockMatches.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "chmod *",
+    ]);
+  });
+
+  it("returns blocked with all raw block matches when no allow matches", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *", "chmod *"] },
+      null,
+    );
+    const decision = decidePolicy(policy, "rm file; chmod 777 file");
+    expect(decision.status).toBe("blocked");
+    expect(decision.allowMatches).toEqual([]);
+    expect(decision.blockMatches.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "chmod *",
+    ]);
+  });
+
+  it("returns unmatched when nothing matches", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *"] },
+      null,
+    );
+    expect(decidePolicy(policy, "git status")).toEqual({
+      status: "unmatched",
+      allowMatches: [],
+      blockMatches: [],
+    });
   });
 });

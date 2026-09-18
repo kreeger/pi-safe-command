@@ -1,11 +1,19 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
-  customPatterns,
-  dangerPatterns,
   isDangerous,
   getAllMatches,
+  setDangerPatterns,
 } from "../patterns.js";
+
+const packagePolicy = JSON.parse(
+  readFileSync(new URL("../../settings.json", import.meta.url), "utf8"),
+) as { version: number; allow: string[]; block: string[] };
+
+// The matcher reads a module-level resolved block list; seed it with the
+// canonical package policy. The extension wires the effective policy at
+// startup (see src/index.ts).
+setDangerPatterns(packagePolicy.block.map((pattern) => ({ pattern })));
 
 describe("isDangerous — glob patterns", () => {
   it("matches rm -rf /", () => {
@@ -234,18 +242,11 @@ describe("Git policy", () => {
     expect(isDangerous(command)).toBeNull();
   });
 
-  it("keeps custom patterns loaded and additive", () => {
-    const configured = JSON.parse(
-      readFileSync(
-        new URL("../../dangerPatterns.json", import.meta.url),
-        "utf8",
-      ),
-    ) as string[];
-
-    expect(customPatterns.map(({ pattern }) => pattern)).toEqual(configured);
-    for (const customPattern of customPatterns) {
-      expect(dangerPatterns).toContainEqual(customPattern);
-    }
+  it("loads the canonical package policy", () => {
+    expect(packagePolicy.version).toBe(1);
+    expect(packagePolicy.allow).toEqual([]);
+    expect(packagePolicy.block).toContain("git push");
+    expect(packagePolicy.block).toContain("rm *");
   });
 
   it("keeps representative non-Git protections unchanged", () => {
