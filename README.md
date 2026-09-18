@@ -40,8 +40,10 @@ Treat it as a safety net for common mistakes, not a guarantee.
 
 ## Dangerous Patterns
 
-The extension checks commands against a set of dangerous patterns before
-execution. Patterns are grouped into categories:
+The extension checks commands against the block patterns in its default policy
+(`settings.json`) before execution. User settings can add blocks and allow
+command-level exceptions; see [Configuration](#configuration). The shipped
+patterns are grouped into categories:
 
 ### File Deletion
 
@@ -111,10 +113,86 @@ It is a heuristic prompt-assist mechanism, not a security boundary.
 `DROP DATABASE`, `DROP TABLE`, `TRUNCATE TABLE`, `redis-cli FLUSHDB`,
 `redis-cli FLUSHALL`, `mongo --eval *`
 
-## Custom Patterns
+## Configuration
 
-Add your own danger patterns by editing `dangerPatterns.json` in the package
-root. Each line is a pattern string using the same syntax as built-in patterns.
+The package ships its default policy in `settings.json`:
+
+```json
+{
+  "version": 1,
+  "allow": [],
+  "block": ["rm *", "git push"]
+}
+```
+
+To add blocks or allow specific commands, create:
+
+`~/.pi/agent/extensions/pi-safe-command/settings.json`
+
+```json
+{
+  "version": 1,
+  "allow": ["rm /tmp/*"],
+  "block": ["my-dangerous-command"]
+}
+```
+
+User blocks are appended to the package defaults. A matching user allow is a
+command-level exception and takes precedence over all matching pattern blocks
+for that command. It does not disable a default pattern globally. The user
+settings file is loaded once when Pi starts. Missing means defaults only;
+malformed or invalid JSON blocks bash commands until corrected and Pi is
+restarted.
+
+### Schema
+
+Both policy files use standard JSON — comments and trailing commas are invalid.
+Each file is a version-1 object with exactly the following fields:
+
+| Field     | Type       | Required | Meaning                                      |
+| --------- | ---------- | -------- | -------------------------------------------- |
+| `version` | `1`        | yes      | Schema version; must be the number `1`.      |
+| `allow`   | `string[]` | yes      | Patterns that allow a matching command.      |
+| `block`   | `string[]` | yes      | Patterns that prompt for a matching command. |
+
+Unknown fields are invalid, all three fields are required, and every entry must
+be a non-empty string after trimming. The old bare JSON array used by
+`dangerPatterns.json` is not accepted.
+
+### Precedence
+
+1. Commands allowed for the session (`Allow (session)`) run without a prompt.
+2. A matching user `allow` pattern is a command-level exception and takes
+   precedence over every matching `block` pattern for that command. It does not
+   disable the block pattern globally.
+3. Otherwise, a matching block pattern prompts for confirmation.
+
+User blocks append to the package blocks; repeated block strings are
+deduplicated after trimming and lowercasing. No allow entry removes a block
+pattern.
+
+### Validation and failure behavior
+
+The policy is validated once at startup, before any bash command runs. Errors
+report the offending file path and, when available, the field and array index. A
+missing user settings file is silent and the package defaults apply. A malformed
+or invalid package or user file fails closed: every bash command is blocked
+until the file is fixed and Pi is restarted. The extension never creates the
+user directory or settings file.
+
+### Migrating from `dangerPatterns.json`
+
+The old package-root `dangerPatterns.json` bare-array file is no longer read or
+published. Move custom patterns into the user settings file as `block` entries
+in the version-1 object:
+
+```json
+{
+  "version": 1,
+  "allow": [],
+  "block": ["my-dangerous-command"]
+}
+```
 
 ### Pattern Syntax
 
@@ -142,6 +220,21 @@ Examples:
 
 - `dd if=` matches `dd if=/dev/zero` but not `dd if you want`
 - `git branch -D` matches `git branch -D main` but not `git branch -Dd`
+
+### Diagnostics
+
+`/test-pattern <command>` runs the same policy resolver as bash interception:
+
+- no match reports that nothing matched;
+- a blocked command reports the first matching block pattern and any additional
+  matches;
+- an allowed command reports that a user preference allowed it and lists the
+  block patterns it suppressed;
+- an invalid policy reports the startup policy error.
+
+Confirmation prompts, `/clear-allowed`, and the session allow list are
+unchanged. In headless mode (`!ctx.hasUI`) a valid policy keeps the existing
+warning-and-allow behavior: the command runs with a `console.warn`.
 
 ## Session Allow List
 
