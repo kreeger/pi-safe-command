@@ -49,6 +49,37 @@ describe("validatePolicyDocument", () => {
     expect(() => validatePolicyDocument(value, POLICY_PATH)).toThrow();
   });
 
+  it("rejects a sparse allow array instead of skipping its holes", () => {
+    const sparseAllow = ["git push", , "rm *"];
+    // Guard: confirm the fixture really contains a hole at index 1, so the
+    // test cannot pass trivially if the literal ever loses its elision.
+    expect(sparseAllow.length).toBe(3);
+    expect(1 in sparseAllow).toBe(false);
+
+    const error = captureError(() =>
+      validatePolicyDocument(
+        { version: 1, allow: sparseAllow, block: [] },
+        POLICY_PATH,
+      ),
+    );
+    expect(error.field).toBe("allow");
+    expect(error.index).toBe(1);
+  });
+
+  it("rejects a sparse block array instead of skipping its holes", () => {
+    const sparseBlock: string[] = ["rm *"];
+    sparseBlock.length = 3;
+
+    const error = captureError(() =>
+      validatePolicyDocument(
+        { version: 1, allow: [], block: sparseBlock },
+        POLICY_PATH,
+      ),
+    );
+    expect(error.field).toBe("block");
+    expect(error.index).toBe(1);
+  });
+
   it("throws an Error with the file path on every failure", () => {
     const cases: unknown[] = [null, { version: 0, allow: [], block: [] }];
     for (const value of cases) {

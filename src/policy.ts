@@ -50,15 +50,20 @@ function validatePatternArray(
     throw createPolicyError(`"${field}" must be an array`, filePath, { field });
   }
 
-  return value.map((entry, index) => {
+  // Iterate by index rather than using `value.map`, which skips holes in a
+  // sparse array and would silently accept hole entries.
+  const entries: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const entry: unknown = value[index];
     if (typeof entry !== "string" || entry.trim() === "") {
       throw createPolicyError(`"${field}[${index}]" must be a non-empty string`, filePath, {
         field,
         index,
       });
     }
-    return entry;
-  });
+    entries.push(entry);
+  }
+  return entries;
 }
 
 export function validatePolicyDocument(value: unknown, filePath: string): PolicyDocument {
