@@ -190,6 +190,39 @@ describe("resolvePolicy", () => {
     ]);
   });
 
+  it("preserves duplicate allow entries in supplied order without deduplication", () => {
+    const policy = resolvePolicy(
+      {
+        version: 1,
+        allow: ["rm /tmp/*", "rm /var/*", "rm /tmp/*"],
+        block: ["rm *"],
+      },
+      { version: 1, allow: ["rm /var/*", "rm /tmp/*"], block: [] },
+    );
+    expect(policy.allows.map(({ pattern }) => pattern)).toEqual([
+      "rm /tmp/*",
+      "rm /var/*",
+      "rm /tmp/*",
+      "rm /var/*",
+      "rm /tmp/*",
+    ]);
+  });
+
+  it("keeps a block active for other commands when a narrower allow is present", () => {
+    const policy = resolvePolicy(
+      { version: 1, allow: [], block: ["rm *"] },
+      { version: 1, allow: ["rm /tmp/*"], block: [] },
+    );
+    expect(policy.allows.map(({ pattern }) => pattern)).toEqual(["rm /tmp/*"]);
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual(["rm *"]);
+
+    const decision = decidePolicy(policy, "rm /etc/passwd");
+    expect(decision.status).toBe("blocked");
+    expect(decision.blockMatches.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+    ]);
+  });
+
   it("keeps package block order before user additions", () => {
     const policy = resolvePolicy(
       { version: 1, allow: [], block: ["rm *", "git push"] },

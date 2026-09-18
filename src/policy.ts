@@ -125,9 +125,11 @@ export function validatePolicyDocument(value: unknown, filePath: string): Policy
 }
 
 /**
- * Convert raw pattern strings into `Pattern` entries, dropping repeats of the
- * same trimmed/lowercased string. The first occurrence wins, so package
+ * Convert raw block pattern strings into `Pattern` entries, dropping repeats of
+ * the same trimmed/lowercased string. The first occurrence wins, so package
  * defaults keep their original spelling and position ahead of user additions.
+ * Allowing entries are not passed through here: user allows are preserved in
+ * full so command-level exceptions never lose a supplied entry.
  */
 function toPatterns(entries: string[]): Pattern[] {
   const seen = new Set<string>();
@@ -159,9 +161,11 @@ function assertNoUserConflict(user: PolicyDocument): void {
 
 /**
  * Merge validated package defaults with an optional validated user document.
- * Package blocks keep their order, user blocks are appended, and normalized
- * duplicates are dropped. An allow entry never removes or disables a block
- * pattern; it only becomes a command-level exception.
+ * Allow entries keep their supplied order and are never deduplicated: package
+ * allows precede user allows and every entry is preserved. Package blocks keep
+ * their order, user blocks are appended, and normalized duplicates are dropped.
+ * An allow entry never removes or disables a block pattern; it only becomes a
+ * command-level exception.
  */
 export function resolvePolicy(
   defaults: PolicyDocument,
@@ -170,7 +174,9 @@ export function resolvePolicy(
   if (user) assertNoUserConflict(user);
 
   return {
-    allows: toPatterns([...defaults.allow, ...(user?.allow ?? [])]),
+    allows: [...defaults.allow, ...(user?.allow ?? [])].map((pattern) => ({
+      pattern,
+    })),
     blocks: toPatterns([...defaults.block, ...(user?.block ?? [])]),
   };
 }
