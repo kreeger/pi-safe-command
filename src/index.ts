@@ -34,6 +34,20 @@ const notify = (
 
 // --- Matching ---
 
+/**
+ * Lines listing the block patterns that matched after the first one, using the
+ * same diagnostic style as the confirmation prompt. Empty when there is at most
+ * one match, so callers can spread the result unconditionally.
+ */
+function additionalMatchLines(blockMatches: Pattern[]): string[] {
+  if (blockMatches.length <= 1) return [];
+  return [
+    "",
+    `Also matches ${blockMatches.length - 1} other pattern(s):`,
+    ...blockMatches.slice(1).map((m) => `  • ${m.pattern}`),
+  ];
+}
+
 async function handleDangerousCommand(
   command: string,
   blockMatches: Pattern[],
@@ -51,13 +65,7 @@ async function handleDangerousCommand(
     "⚠️ Dangerous Command",
     "",
     `${display.slice(0, 80)}${display.length > 80 ? "..." : ""}`,
-    ...(blockMatches.length > 1
-      ? [
-          "",
-          `Also matches ${blockMatches.length - 1} other pattern(s):`,
-          ...blockMatches.slice(1).map((m) => `  • ${m.pattern}`),
-        ]
-      : []),
+    ...additionalMatchLines(blockMatches),
     "",
     "Allow?",
   ];
@@ -111,14 +119,17 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
+
+    // Fail closed before inspecting the command so an invalid policy blocks
+    // every bash call, including empty, whitespace-only, or malformed input.
+    if (!policyResult.ok) {
+      return { block: true, reason: POLICY_INVALID_REASON };
+    }
+
     const raw = event.input.command;
     if (typeof raw !== "string") return undefined;
     const command = raw.trim();
     if (!command) return undefined;
-
-    if (!policyResult.ok) {
-      return { block: true, reason: POLICY_INVALID_REASON };
-    }
 
     if (allowedCommands.has(command)) {
       notify(ctx, "Running allowed command");
@@ -178,7 +189,10 @@ export default function (pi: ExtensionAPI) {
       }
       if (decision.status === "blocked") {
         ctx.ui.notify(
-          `[SafeCommand] MATCH: "${decision.blockMatches[0]?.pattern}"`,
+          [
+            `[SafeCommand] MATCH: "${decision.blockMatches[0]?.pattern}"`,
+            ...additionalMatchLines(decision.blockMatches),
+          ].join("\n"),
           "warning",
         );
         return;

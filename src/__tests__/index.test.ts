@@ -180,6 +180,35 @@ describe("startup policy integration", () => {
     errorSpy.mockRestore();
   });
 
+  it("blocks empty, whitespace, and malformed bash input when startup policy is invalid", async () => {
+    writeUserSettings("{ not json");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fake = await createExtension();
+    const ctx = createCtx();
+
+    // A bash event whose `input` carries no `command` key is handled without
+    // throwing (the non-string guard covers it) but must still fail closed.
+    const malformed = {
+      type: "tool_call",
+      toolCallId: "call-3",
+      toolName: "bash",
+      input: {},
+    };
+
+    for (const event of [bashEvent(""), bashEvent("   "), malformed]) {
+      const result = (await fake.invokeToolCall(event, ctx)) as {
+        block?: boolean;
+        reason?: string;
+      };
+      expect(result).toEqual({
+        block: true,
+        reason: "[SafeCommand] Blocked: policy configuration is invalid",
+      });
+    }
+    expect(ctx.selects).toHaveLength(0);
+    errorSpy.mockRestore();
+  });
+
   it("still prompts for a dangerous command and honors Allow (once)", async () => {
     const fake = await createExtension();
     const ctx = createCtx({ choice: "Allow (once)" });
@@ -269,6 +298,9 @@ describe("/test-pattern policy reporting", () => {
     expect(ctx.notifications).toHaveLength(1);
     expect(ctx.notifications[0]?.message).toMatch(/user preference/i);
     expect(ctx.notifications[0]?.message).toContain("git push");
+    expect(ctx.notifications[0]?.message).toContain(
+      "suppressed block patterns: git push",
+    );
   });
 
   it("preserves the MATCH output for blocked commands", async () => {
@@ -280,6 +312,21 @@ describe("/test-pattern policy reporting", () => {
     expect(ctx.notifications).toHaveLength(1);
     expect(ctx.notifications[0]?.message).toContain('MATCH: "rm *"');
     expect(ctx.notifications[0]?.type).toBe("warning");
+  });
+
+  it("reports the first block match and every additional matching pattern", async () => {
+    writeUserSettings({ version: 1, allow: [], block: ["rm -rf /"] });
+    const fake = await createExtension();
+    const ctx = createCtx();
+
+    await fake.runCommand("test-pattern", "rm -rf /", ctx);
+
+    expect(ctx.notifications).toHaveLength(1);
+    const notification = ctx.notifications[0];
+    expect(notification?.type).toBe("warning");
+    expect(notification?.message).toContain('[SafeCommand] MATCH: "rm *"');
+    expect(notification?.message).toContain("Also matches 1 other pattern(s):");
+    expect(notification?.message).toContain("• rm -rf /");
   });
 
   it("reports no match for safe commands", async () => {
