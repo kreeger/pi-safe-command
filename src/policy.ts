@@ -14,6 +14,7 @@
  * decision through `decidePolicy`.
  */
 
+import { readFileSync } from "node:fs";
 import { matches } from "./patterns.js";
 
 export type PolicyDocument = {
@@ -49,6 +50,15 @@ export type PolicyError = Error & {
   field?: string;
   index?: number;
 };
+
+/**
+ * Result of loading the policy files. A failure carries the detailed
+ * `PolicyError` so callers can install a fail-closed path without catching an
+ * untyped exception.
+ */
+export type PolicyLoadResult =
+  | { ok: true; policy: ResolvedPolicy }
+  | { ok: false; error: PolicyError };
 
 const POLICY_FIELDS = ["version", "allow", "block"] as const;
 type ArrayField = "allow" | "block";
@@ -206,4 +216,122 @@ export function decidePolicy(
     return { status: "blocked", allowMatches: [], blockMatches };
   }
   return { status: "unmatched", allowMatches: [], blockMatches: [] };
+}
+
+/**
+ * Read one policy file. `ENOENT` is the only read failure treated as absence:
+ * it covers both a missing file and a missing parent directory, and nothing is
+ * created. Every other read failure (for example a directory in place of the
+ * file) is a `PolicyError` carrying the path. Returns `null` when absent.
+ */
+function readPolicyFile(filePath: string): string | null {
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw createPolicyError(
+      `unable to read file: ${error instanceof Error ? error.message : String(error)}`,
+      filePath,
+    );
+  }
+}
+
+function parsePolicyFile(contents: string, filePath: string): PolicyDocument {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    throw createPolicyError(
+      `malformed JSON: ${error instanceof Error ? error.message : String(error)}`,
+      filePath,
+    );
+  }
+  return validatePolicyDocument(parsed, filePath);
+}
+
+function loadRequiredPolicyFile(filePath: string): PolicyDocument {
+  const contents = readPolicyFile(filePath);
+  if (contents === null) {
+    throw createPolicyError("file is missing", filePath);
+  }
+  return parsePolicyFile(contents, filePath);
+}
+
+function loadOptionalPolicyFile(filePath: string): PolicyDocument | null {
+  const contents = readPolicyFile(filePath);
+  return contents === null ? null : parsePolicyFile(contents, filePath);
+}
+
+/**
+ * Attribute a resolution failure to the user policy. `resolvePolicy` is
+ * pathless, and its only failure is a user allow/block conflict, so the user
+ * settings path from the loader is the offending file.
+ */
+function createUserConflictError(
+  error: unknown,
+  userSettingsPath: string,
+): PolicyError {
+  const detail = error instanceof Error ? error.message : String(error);
+  const policyError = new Error(
+    `${detail} (in ${userSettingsPath})`,
+  ) as PolicyError;
+  policyError.filePath = userSettingsPath;
+  return policyError;
+}
+
+/**
+ * Load the required package policy and the optional user policy, then resolve
+ * them into the effective policy.
+ *
+ * The package file must exist, be readable, be valid JSON, and satisfy the
+ * strict version 1 schema. The user file is optional: an absent file (including
+ * a missing parent directory) falls back to the package defaults silently, but
+ * a present file that is unreadable, malformed, or invalid fails the load
+ * instead of being ignored. Every failure throws a `PolicyError` carrying the
+ * offending path (plus field/index for schema failures). No fallback policy is
+ * synthesized and no file or directory is created or written.
+ */
+export function loadPolicy(
+  packageSettingsPath: string,
+  userSettingsPath: string,
+): ResolvedPolicy {
+  const defaults = loadRequiredPolicyFile(packageSettingsPath);
+  const user = loadOptionalPolicyFile(userSettingsPath);
+
+  try {
+    return resolvePolicy(defaults, user);
+  } catch (error) {
+    throw createUserConflictError(error, userSettingsPath);
+  }
+}
+
+function asPolicyError(error: unknown, filePath: string): PolicyError {
+  if (
+    error instanceof Error &&
+    typeof (error as PolicyError).filePath === "string"
+  ) {
+    return error as PolicyError;
+  }
+  return createPolicyError(
+    error instanceof Error ? error.message : String(error),
+    filePath,
+  );
+}
+
+/**
+ * Fail-closed variant of `loadPolicy`. Never throws: returns the resolved
+ * policy or the detailed `PolicyError` for the caller to log and act on.
+ */
+export function loadPolicyResult(
+  packageSettingsPath: string,
+  userSettingsPath: string,
+): PolicyLoadResult {
+  try {
+    return {
+      ok: true,
+      policy: loadPolicy(packageSettingsPath, userSettingsPath),
+    };
+  } catch (error) {
+    return { ok: false, error: asPolicyError(error, packageSettingsPath) };
+  }
 }

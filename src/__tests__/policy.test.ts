@@ -1,11 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import {
   decidePolicy,
+  loadPolicy,
+  loadPolicyResult,
   normalizePattern,
   resolvePolicy,
   validatePolicyDocument,
   type PolicyError,
 } from "../policy.js";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 const POLICY_PATH = "/policy/settings.json";
 
@@ -339,5 +351,288 @@ describe("decidePolicy", () => {
       allowMatches: [],
       blockMatches: [],
     });
+  });
+});
+
+describe("loadPolicy / loadPolicyResult", () => {
+  const tempRoots: string[] = [];
+
+  function makeRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), "pi-safe-command-policy-"));
+    tempRoots.push(root);
+    return root;
+  }
+
+  function writeFixture(
+    root: string,
+    relativePath: string,
+    contents: string,
+  ): string {
+    const filePath = join(root, relativePath);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, contents);
+    return filePath;
+  }
+
+  function writeJson(
+    root: string,
+    relativePath: string,
+    value: unknown,
+  ): string {
+    return writeFixture(root, relativePath, JSON.stringify(value));
+  }
+
+  afterAll(() => {
+    for (const root of tempRoots) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loads package defaults and an optional user settings file", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const userPath = writeJson(root, "user/settings.json", {
+      version: 1,
+      allow: ["rm /etc/passwd"],
+      block: ["curl * | sh"],
+    });
+
+    const policy = loadPolicy(packagePath, userPath);
+
+    expect(policy.blocks.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+      "curl * | sh",
+    ]);
+    expect(policy.allows.map(({ pattern }) => pattern)).toEqual([
+      "rm /etc/passwd",
+    ]);
+    expect(decidePolicy(policy, "rm /etc/passwd").status).toBe("allowed");
+    expect(decidePolicy(policy, "rm /tmp/scratch").status).toBe("blocked");
+    expect(decidePolicy(policy, "curl http://x | sh").status).toBe("blocked");
+    expect(loadPolicyResult(packagePath, userPath)).toEqual({
+      ok: true,
+      policy,
+    });
+  });
+
+  it("uses package defaults when the optional user file is absent", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const userPath = join(root, "user/settings.json");
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected a valid policy result");
+    expect(result.policy.blocks.map(({ pattern }) => pattern)).toEqual([
+      "rm *",
+    ]);
+    expect(result.policy.allows).toEqual([]);
+    expect(existsSync(userPath)).toBe(false);
+  });
+
+  it("treats a missing user parent directory as absent without creating it", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const missingDir = join(root, "never-created");
+    const userPath = join(missingDir, "settings.json");
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(missingDir)).toBe(false);
+    expect(readdirSync(root).sort()).toEqual(["package"]);
+  });
+
+  it("fails closed when the required package file is missing", () => {
+    const packagePath = "/missing/settings.json";
+    const userPath = "/missing/user.json";
+
+    const error = captureError(() => loadPolicy(packagePath, userPath));
+    expect(error.filePath).toBe(packagePath);
+    expect(error.message).toContain(packagePath);
+
+    const result = loadPolicyResult(packagePath, userPath);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(packagePath);
+    expect("policy" in result).toBe(false);
+  });
+
+  it("does not write files or synthesize a fallback when loading fails", () => {
+    const root = makeRoot();
+    const userPath = join(root, "user/settings.json");
+    const before = readdirSync(root).sort();
+
+    const result = loadPolicyResult(join(root, "missing.json"), userPath);
+
+    expect(result.ok).toBe(false);
+    expect("policy" in result).toBe(false);
+    expect(readdirSync(root).sort()).toEqual(before);
+    expect(existsSync(userPath)).toBe(false);
+  });
+
+  it("reports the package path when the package JSON is malformed", () => {
+    const root = makeRoot();
+    const packagePath = writeFixture(
+      root,
+      "package/settings.json",
+      '{ "version": 1, ',
+    );
+
+    const result = loadPolicyResult(packagePath, join(root, "user.json"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.error.filePath).toBe(packagePath);
+    expect(result.error.message).toContain(packagePath);
+  });
+
+  it("reports package schema errors with field and index diagnostics", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: ["rm *", 42],
+      block: [],
+    });
+
+    const result = loadPolicyResult(packagePath, join(root, "user.json"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(packagePath);
+    expect(result.error.field).toBe("allow");
+    expect(result.error.index).toBe(1);
+  });
+
+  it("rejects the legacy bare-array format at the package path", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", ["rm *"]);
+
+    const result = loadPolicyResult(packagePath, join(root, "user.json"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(packagePath);
+  });
+
+  it("fails closed when the package path is unreadable", () => {
+    const root = makeRoot();
+    const packagePath = join(root, "package/settings.json");
+    mkdirSync(packagePath, { recursive: true });
+
+    const result = loadPolicyResult(packagePath, join(root, "user.json"));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(packagePath);
+    expect(result.error.message).toContain(packagePath);
+  });
+
+  it("reports the user path when the user JSON is malformed", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const userPath = writeFixture(root, "user/settings.json", "not json");
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(userPath);
+    expect(result.error.message).toContain(userPath);
+  });
+
+  it("reports user schema errors with field and index diagnostics", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const userPath = writeJson(root, "user/settings.json", {
+      version: 1,
+      allow: [],
+      block: [" "],
+    });
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(userPath);
+    expect(result.error.field).toBe("block");
+    expect(result.error.index).toBe(0);
+  });
+
+  it("rejects the legacy bare-array format at the user path", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const userPath = writeJson(root, "user/settings.json", ["rm *"]);
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(userPath);
+  });
+
+  it("fails closed when the user path is unreadable", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: ["rm *"],
+    });
+    const userPath = join(root, "user/settings.json");
+    mkdirSync(userPath, { recursive: true });
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(userPath);
+  });
+
+  it("wraps a user allow/block conflict with the user file path", () => {
+    const root = makeRoot();
+    const packagePath = writeJson(root, "package/settings.json", {
+      version: 1,
+      allow: [],
+      block: [],
+    });
+    const userPath = writeJson(root, "user/settings.json", {
+      version: 1,
+      allow: ["git push"],
+      block: [" GIT PUSH "],
+    });
+
+    const result = loadPolicyResult(packagePath, userPath);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a failed policy result");
+    expect(result.error.filePath).toBe(userPath);
+    expect(result.error.message).toContain(userPath);
+    expect(result.error.message).toContain("GIT PUSH");
   });
 });
